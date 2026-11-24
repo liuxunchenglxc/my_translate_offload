@@ -1,0 +1,111 @@
+name: OffloadTranslate · Translate document
+
+on:
+  workflow_dispatch:
+    inputs:
+      storage_key:
+        description: Opaque PersonalStorage task key
+        required: true
+        type: string
+      attempt:
+        description: Monotonic attempt number used to fence stale workers
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offload-translate-${{ inputs.storage_key }}
+  cancel-in-progress: false
+
+jobs:
+  translate-document:
+    name: Start llama.cpp and translate with Hunyuan 7B
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      PYTHONUNBUFFERED: "1"
+      PERSONALSTORE_URL: ${{ secrets.PERSONALSTORE_URL || vars.PERSONALSTORE_URL || 'https://hc.lxc.nya.je:24687/' }}
+      PERSONALSTORE_TOKEN: ${{ secrets.PERSONALSTORE_TOKEN }}
+      HF_ENDPOINT: ${{ vars.HF_ENDPOINT || 'https://huggingface.co' }}
+      MODEL_REPO: ${{ vars.MODEL_REPO || 'Edge-Quant/Hunyuan-7B-Instruct-Q4_K_M-GGUF' }}
+      MODEL_FILE: ${{ vars.MODEL_FILE || 'hunyuan-7b-instruct-q4_k_m.gguf' }}
+      MODEL_SHA256: ${{ vars.MODEL_SHA256 }}
+      MODEL_CONTEXT: ${{ vars.MODEL_CONTEXT || '8192' }}
+      MODEL_THREADS: ${{ vars.MODEL_THREADS || '4' }}
+      LLAMA_VERSION: ${{ vars.LLAMA_VERSION }}
+      LLAMA_CACHE: .cache/offload-translate
+    steps:
+      - name: Checkout worker repository
+        uses: actions/checkout@v4
+
+      - name: Validate PersonalStorage credentials
+        shell: bash
+        run: |
+          if [ -z "${PERSONALSTORE_TOKEN:-}" ]; then
+            echo "::error::Set the PERSONALSTORE_TOKEN Actions secret before running this workflow."
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Resolve llama.cpp release
+        id: llama-release
+        shell: bash
+        run: |
+          version="${LLAMA_VERSION:-}"
+          if [ -z "$version" ]; then
+            version="$(curl -fsSL https://api.github.com/repos/ggml-org/llama.cpp/releases | jq -r '.[0].tag_name' 2>/dev/null || true)"
+          fi
+          version="${version:-b12503}"
+          echo "LLAMA_VERSION=$version" >> "$GITHUB_ENV"
+          echo "tag=$version" >> "$GITHUB_OUTPUT"
+          echo "Using llama.cpp release: $version"
+
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Restore Hunyuan GGUF cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/offload-translate/models
+          key: offload-model-${{ runner.os }}-${{ vars.MODEL_REPO || 'Edge-Quant/Hunyuan-7B-Instruct-Q4_K_M-GGUF' }}-${{ vars.MODEL_FILE || 'hunyuan-7b-instruct-q4_k_m.gguf' }}-${{ vars.MODEL_SHA256 || '0ac57a0ed99161b749dadde5b7165d78375e113b03dca193c1c4744864d16a4b' }}
+
+      - name: Restore llama.cpp binary cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/offload-translate/llamacpp
+          key: offload-llama-${{ runner.os }}-${{ steps.llama-release.outputs.tag }}
+
+      - name: Run resumable translation
+        id: worker
+        env:
+          TASK_STORAGE_KEY: ${{ inputs.storage_key }}
+          TASK_ATTEMPT: ${{ inputs.attempt }}
+        run: >-
+          python -m worker.worker
+          --phase translation
+          --storage-key "$TASK_STORAGE_KEY"
+          --attempt "$TASK_ATTEMPT"
+
+      - name: Persist workflow setup failure
+        if: failure()
+        env:
+          TASK_STORAGE_KEY: ${{ inputs.storage_key }}
+          TASK_ATTEMPT: ${{ inputs.attempt }}
+        run: |
+          if [ -f worker/failure.py ]; then
+            python -m worker.failure \
+              --phase translation \
+              --storage-key "$TASK_STORAGE_KEY" \
+              --attempt "$TASK_ATTEMPT" \
+              --message "GitHub Actions translation setup failed; inspect the run log"
+          fi
