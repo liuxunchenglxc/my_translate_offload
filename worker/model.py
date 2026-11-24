@@ -7,11 +7,11 @@ import urllib.error
 import urllib.request
 
 
-PROTECTED_PATTERNS = [
-    re.compile(r"https?://[^\s)\]>]+"),
-    re.compile(r"`[^`\n]+`"),
-    re.compile(r"(?<=\]\()[^)]+(?=\))"),
-]
+PROTECTED_PATTERN = re.compile(
+    r"`[^`\n]+`"
+    r"|(?<=\]\()[^)]+(?=\))"
+    r"|https?://[^\s)\]`]+"
+)
 
 
 class LocalChatModel:
@@ -69,15 +69,15 @@ class LocalChatModel:
     def _protect(text: str) -> tuple[str, dict[str, str]]:
         mapping: dict[str, str] = {}
         counter = 0
-        for pattern in PROTECTED_PATTERNS:
-            def replace(match):
-                nonlocal counter
-                token = f"ZXQKEEP{counter:04d}QXZ"
-                mapping[token] = match.group(0)
-                counter += 1
-                return token
-            text = pattern.sub(replace, text)
-        return text, mapping
+
+        def replace(match):
+            nonlocal counter
+            token = f"ZXQKEEP{counter:04d}QXZ"
+            mapping[token] = match.group(0)
+            counter += 1
+            return token
+
+        return PROTECTED_PATTERN.sub(replace, text), mapping
 
     def translate(self, text: str, target_language: str, source_language: str,
                   glossary: list[dict]) -> str:
