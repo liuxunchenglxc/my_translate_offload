@@ -231,7 +231,10 @@ class TaskWorker:
         glossary = self.store.load_json(f"{self.key}.glossary.json") or []
         blocks = parsed["blocks"]
         progress_name = f"{self.key}.progress.json"
-        progress = self.store.load_json(progress_name) or {"completed": []}
+        progress = self.store.load_json(
+            progress_name,
+            missing_ok=True,
+        ) or {"completed": []}
         completed = set(int(x) for x in progress.get("completed", []))
         total = len(blocks)
         target = self.task.get("targetLanguage", "Simplified Chinese")
